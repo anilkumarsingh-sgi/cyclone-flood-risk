@@ -114,10 +114,10 @@ CYCLONE_RISK_THRESHOLDS = {
 # Flood depth thresholds (from flood.js classification)
 FLOOD_RISK_THRESHOLDS = {
     "No Risk":   (None, 0),
-    "Low":       (0, 0.5),
-    "Moderate":  (0.5, 2.0),
-    "High":      (2.0, 4.0),
-    "Severe":    (4.0, float("inf")),
+    "Low":       (0, 0.3),
+    "Moderate":  (0.3, 0.8),
+    "High":      (0.8, 1.5),
+    "Severe":    (1.5, float("inf")),
 }
 
 # DEM (Digital Elevation Model) risk thresholds (from JAXA ALOS AW3D30 V4_1)
@@ -552,9 +552,9 @@ def build_flood_risk_image(band: str = "RP100_depth"):
     flood_only = depth.updateMask(depth.gt(0))
 
     classified = flood_only.expression(
-        "(b(0) > 0 && b(0) < 0.5) ? 2"
-        + ": (b(0) < 2) ? 4"
-        + ": (b(0) < 4) ? 6"
+        "(b(0) > 0 && b(0) < 0.3) ? 2"
+        + ": (b(0) < 0.8) ? 4"
+        + ": (b(0) < 1.5) ? 6"
         + ": 8"
     ).updateMask(flood_only)
 
@@ -568,15 +568,20 @@ def get_flood_risk_at_point(
     band: str = "RP100_depth",
     buffer_radius_m: int = 0,
 ) -> dict:
-    """Query flood risk at lat/lon, optionally averaged within a buffer radius."""
+    """Query flood risk at lat/lon.
+
+    If a buffer is provided, classify by the maximum depth within the buffer
+    so any intersection with hazardous pixels is reflected in the result.
+    """
     point = ee.Geometry.Point([lon, lat])
     query_geom = point if buffer_radius_m <= 0 else point.buffer(buffer_radius_m)
 
     flood_image = ee.ImageCollection("JRC/CEMS_GLOFAS/FloodHazard/v2_1").mosaic()
     depth_image = flood_image.select(band)
 
+    reducer = ee.Reducer.max() if buffer_radius_m > 0 else ee.Reducer.mean()
     sampled = depth_image.reduceRegion(
-        reducer=ee.Reducer.mean(),
+        reducer=reducer,
         geometry=query_geom,
         scale=90,
         bestEffort=True,
@@ -589,11 +594,11 @@ def get_flood_risk_at_point(
 
     depth_m = round(float(depth_val), 3)
 
-    if depth_m < 0.5:
+    if depth_m < 0.3:
         level = "Low"
-    elif depth_m < 2.0:
+    elif depth_m < 0.8:
         level = "Moderate"
-    elif depth_m < 4.0:
+    elif depth_m < 1.5:
         level = "High"
     else:
         level = "Severe"
@@ -2551,7 +2556,7 @@ def render_flood_page(inputs, ee_ready):
         **Why:** Flood damage is the most frequent natural catastrophe peril in India, affecting basements, ground floors, and properties near rivers. This page shows how deep floodwater could get at your exact location for different statistical return periods.
 
         **How to use:**
-        - The **left map** shows the classified flood depth layer — green is shallow (<0.5m), red is severe (>4m).
+        - The **left map** shows the classified flood depth layer — green is shallow (<0.3m), red is severe (>=1.5m).
         - The **right panel** shows the exact depth in meters and the risk level at the queried point.
         - The **gauge chart** visualizes where the depth falls on the 0–6m scale.
         - Click **"Run All Return Periods"** to compare flood depths across all 7 scenarios (10yr to 500yr) — this helps assess how the risk escalates for rarer events.
@@ -2567,7 +2572,7 @@ def render_flood_page(inputs, ee_ready):
         - **Data Source:** JRC CEMS GloFAS Flood Hazard Maps v2.1
         - **Selected Return Period:** {inputs['flood_rp']}
         - **Variable:** Flood inundation depth (meters)
-        - **Classification:** 4-tier (Low <0.5m / Moderate 0.5–2m / High 2–4m / Severe >4m)
+        - **Classification:** 4-tier (Low <0.3m / Moderate 0.3–0.8m / High 0.8–1.5m / Severe >=1.5m)
         - **Resolution:** ~90m (3 arc-seconds)
         """)
 
@@ -2592,10 +2597,10 @@ def render_flood_page(inputs, ee_ready):
 
         legend_html = """
         <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">
-            <span class="risk-badge risk-low">Low (&lt;0.5m)</span>
-            <span class="risk-badge risk-moderate">Moderate (0.5-2m)</span>
-            <span class="risk-badge risk-high">High (2-4m)</span>
-            <span class="risk-badge risk-extreme">Severe (&gt;4m)</span>
+            <span class="risk-badge risk-low">Low (&lt;0.3m)</span>
+            <span class="risk-badge risk-moderate">Moderate (0.3-0.8m)</span>
+            <span class="risk-badge risk-high">High (0.8-1.5m)</span>
+            <span class="risk-badge risk-extreme">Severe (≥1.5m)</span>
         </div>"""
         st.markdown(legend_html, unsafe_allow_html=True)
 
@@ -2637,10 +2642,10 @@ def render_flood_page(inputs, ee_ready):
                     "axis": {"range": [0, 6]},
                     "bar": {"color": "#1565C0"},
                     "steps": [
-                        {"range": [0, 0.5], "color": "#2ECC71"},
-                        {"range": [0.5, 2], "color": "#F1C40F"},
-                        {"range": [2, 4], "color": "#E67E22"},
-                        {"range": [4, 6], "color": "#E74C3C"},
+                        {"range": [0, 0.3], "color": "#2ECC71"},
+                        {"range": [0.3, 0.8], "color": "#F1C40F"},
+                        {"range": [0.8, 1.5], "color": "#E67E22"},
+                        {"range": [1.5, 6], "color": "#E74C3C"},
                     ],
                 },
             ))
