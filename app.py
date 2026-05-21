@@ -1378,6 +1378,125 @@ def geocode_place(query: str, api_key: str) -> list:
     return out
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def reverse_geocode_district_state(lat: float, lon: float) -> dict:
+    """Resolve district/state for coordinates using OpenStreetMap Nominatim."""
+    url = "https://nominatim.openstreetmap.org/reverse"
+    params = {
+        "format": "jsonv2",
+        "lat": lat,
+        "lon": lon,
+        "zoom": 10,
+        "addressdetails": 1,
+    }
+    headers = {"User-Agent": "natcat-underwriting-engine/1.0"}
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=15)
+        if r.status_code != 200:
+            return {"district": "Unknown", "state": "Unknown"}
+        addr = (r.json() or {}).get("address") or {}
+        district = (
+            addr.get("state_district")
+            or addr.get("county")
+            or addr.get("district")
+            or addr.get("city")
+            or addr.get("town")
+            or "Unknown"
+        )
+        state = addr.get("state") or "Unknown"
+        return {"district": district, "state": state}
+    except Exception:
+        return {"district": "Unknown", "state": "Unknown"}
+
+
+def build_google_satellite_static_map_url(lat: float, lon: float, api_key: str) -> str:
+    """Build Google static satellite map URL with a red location marker."""
+    if not api_key:
+        return ""
+    return (
+        "https://maps.googleapis.com/maps/api/staticmap"
+        f"?center={lat:.6f},{lon:.6f}"
+        "&zoom=14"
+        "&size=1280x720"
+        "&scale=2"
+        "&maptype=satellite"
+        f"&markers=color:red%7Clabel:R%7C{lat:.6f},{lon:.6f}"
+        f"&key={api_key}"
+    )
+
+
+def enrich_assessment_for_report(assessment: dict, places_api_key: str = "", ee_ready: bool = True) -> dict:
+    """Populate report-ready metadata used by PDF and report exports."""
+    inp = assessment.get("inputs", {}) or {}
+    lat = inp.get("lat")
+    lon = inp.get("lon")
+    if lat is None or lon is None:
+        return assessment
+
+    lat = float(lat)
+    lon = float(lon)
+    cyclone = assessment.get("cyclone", {}) or {}
+    flood = assessment.get("flood", {}) or {}
+    dem = assessment.get("dem", {}) or {}
+    decision = assessment.get("decision", {}) or {}
+
+    flood_score_map = {
+        "No Risk": 0.0,
+        "Low": 20.0,
+        "Moderate": 50.0,
+        "High": 75.0,
+        "Severe": 95.0,
+    }
+    flood_score = flood_score_map.get(flood.get("risk_level", "No Risk"), 0.0)
+
+    loc_meta = reverse_geocode_district_state(lat, lon)
+    static_map_url = build_google_satellite_static_map_url(lat, lon, places_api_key)
+
+    water = assessment.get("water_proximity")
+    if not water:
+        wa = st.session_state.get("water_assessment")
+        if wa and abs(float(wa.get("lat", 0.0)) - lat) < 1e-6 and abs(float(wa.get("lon", 0.0)) - lon) < 1e-6:
+            water = wa.get("result")
+        elif ee_ready:
+            try:
+                water = get_water_body_risk_at_point(lat, lon, search_radius_m=2000)
+            except Exception:
+                water = None
+
+    assessment["report_location"] = {
+        "lat": lat,
+        "lon": lon,
+        "district": loc_meta.get("district", "Unknown"),
+        "state": loc_meta.get("state", "Unknown"),
+        "risk_level": decision.get("decision", "Unknown"),
+        "perils": {
+            "cyclone": {
+                "score": float(cyclone.get("risk_score", 0.0)),
+                "category": cyclone.get("risk_level", "Unknown"),
+            },
+            "flood": {
+                "score": float(flood_score),
+                "category": flood.get("risk_level", "Unknown"),
+            },
+            "dem": {
+                "score": float(dem.get("risk_score", 0.0)),
+                "category": dem.get("risk_level", "Unknown"),
+            },
+        },
+        "water_proximity": {
+            "distance_m": (water or {}).get("distance_m"),
+            "risk_level": (water or {}).get("risk_level", "Unknown"),
+            "water_class": (water or {}).get("water_class", "Unknown"),
+            "water_name": (water or {}).get("water_name", ""),
+        },
+        "google_static_map_url": static_map_url,
+    }
+
+    if water:
+        assessment["water_proximity"] = water
+    return assessment
+
+
 def compute_poi_hazard_score(pois: list, radius_m: int) -> dict:
     """
     Aggregate POI hazard score using **distance-banded** weighting.
@@ -1550,7 +1669,7 @@ def render_sidebar():
             ["📊 Dashboard", "🌀 Cyclone Risk", "🌊 Flood Risk", "🗻 DEM Low-Lying Risk",
              "💧 Water Body Proximity",
              "🏭 Hazard Proximity (POI)",
-             "📋 Underwriting Decision", "📄 Report", "📜 History"],
+             "📄 Report", "📜 History"],
             label_visibility="collapsed",
         )
 
@@ -1638,62 +1757,28 @@ def render_sidebar():
             help="Average risk over an area around the selected lat/lon. 0 = exact point only.",
         )
 
-        st.markdown("---")
-        st.markdown("### 🏢 Property Details")
-        with st.expander("ℹ️ What is this? How to use?"):
-            st.markdown("""
-            **What:** Physical and usage characteristics of the insured property.
-
-            **Why:** These factors directly affect how vulnerable a building is to cyclone wind damage and flood inundation. A concrete high-rise is far more resilient than a ground-floor wooden structure near the coast.
-
-            **How to use:**
-            - **TSI (Total Sum Insured):** The full replacement/reinstatement value of the property in ₹. This is the maximum amount payable under the policy.
-            - **Construction Type:** Select the primary structural material — RCC is strongest (factor 1.0×), Kutcha/Temporary is weakest (1.8×).
-            - **Occupancy:** What the building is used for — hospitals and heavy industry carry higher risk factors.
-            - **Building Age:** Older buildings are more vulnerable to structural damage.
-            - **Floor Level:** Lower floors (especially basements) face much higher flood exposure.
-            - **Coast Proximity:** Distance from coastline — closer means higher cyclone wind speeds and storm surge risk.
-            """)
-
-        tsi = st.number_input(
-            "Total Sum Insured (₹)",
-            value=50_000_000, min_value=100_000, max_value=10_000_000_000,
-            step=1_000_000, format="%d",
-            help="Full replacement value of the property. Determines the premium base.",
-        )
-
-        construction = st.selectbox("Construction Type", list(CONSTRUCTION_FACTORS.keys()),
-                                    help="Primary structural material. Affects damage vulnerability (factor 1.0×–1.8×).")
-        occupancy = st.selectbox("Occupancy Type", list(OCCUPANCY_FACTORS.keys()),
-                                 help="Building usage type. Higher-risk occupancies increase premium.")
-        age = st.selectbox("Building Age", list(AGE_FACTORS.keys()),
-                           help="Older buildings have higher vulnerability to NatCat damage.")
-        floor_level = st.selectbox("Floor Level (Flood Exposure)", list(FLOOR_FACTORS.keys()),
-                                   help="Basements & ground floors face the highest flood risk.")
-        coast_proximity = st.selectbox("Proximity to Coast", list(COAST_FACTORS.keys()),
-                                       help="Distance from coastline. <5 km adds 50% cyclone loading.")
+        # Default policy inputs retained for backend risk/premium compatibility.
+        tsi = 50_000_000
+        construction = "RCC (Reinforced Concrete)"
+        occupancy = "Residential"
+        age = "0-5 years"
+        floor_level = "2nd Floor"
+        coast_proximity = "> 100 km"
 
         st.markdown("---")
         st.markdown("### 📐 Policy Terms")
         with st.expander("ℹ️ What is this? How to use?"):
             st.markdown("""
-            **What:** Core pricing and coverage parameters for the insurance policy.
+            **What:** Flood modeling parameter for this risk assessment.
 
-            **Why:** These terms control the premium calculation and the flood scenario modeled. The base rate is the starting price per ₹100 of TSI; the deductible is the self-retained portion the insured bears before the policy pays.
+            **Why:** Flood depth depends on scenario severity. Return period selection controls whether you model frequent or extreme flooding.
 
             **How to use:**
-            - **Base Rate (%):** The unloaded premium rate before any NatCat or property adjustments. Typically 0.05%–0.50% for property insurance.
-            - **NatCat Deductible (%):** Percentage of TSI the policyholder pays first on any NatCat claim. Higher deductibles reduce premium (up to 12.5% discount at 25%).
             - **Flood Return Period:** Statistical recurrence interval for the flood scenario. "100 Year" means a 1% annual probability flood — higher return periods model rarer but more severe events.
             """)
 
-        base_rate = st.number_input(
-            "Base Rate (%)", value=0.10, min_value=0.01, max_value=5.0,
-            step=0.01, format="%.2f",
-            help="Starting premium rate per ₹100 TSI, before peril/property loadings.",
-        )
-        deductible = st.slider("NatCat Deductible (%)", 0, 25, 2,
-                                help="Self-insured retention. Higher = lower premium.")
+        base_rate = 0.10
+        deductible = 2
 
         flood_rp = st.selectbox(
             "Flood Return Period", list(RETURN_PERIODS.keys()), index=4,
@@ -1782,7 +1867,7 @@ def render_dashboard(inputs, ee_ready, ee_error: str | None = None):
         **Why:** Insurers need a quick, data-driven view of how exposed a property is to cyclones and floods before deciding whether to accept, refer, or decline a risk. This dashboard automates that assessment using real geospatial data.
 
         **How to use:**
-        1. 👈 Set the **location, property details, and policy terms** in the left sidebar.
+        1. 👈 Set the **location and flood return period** in the left sidebar.
         2. Click **🔍 Run Risk Assessment** — the engine queries Google Earth Engine for live hazard data.
         3. Review the **5 metric cards** (Cyclone Score, Flood Depth, Combined Score, Premium, Decision).
         4. Explore the **interactive risk map** (toggle Cyclone/Flood layers via the layer control icon).
@@ -2685,172 +2770,6 @@ def render_flood_page(inputs, ee_ready):
 
 
 # ══════════════════════════════════════════════════════════════════
-# PAGE: UNDERWRITING DECISION
-# ══════════════════════════════════════════════════════════════════
-
-def render_underwriting_page(inputs, ee_ready):
-    st.markdown("# 📋 Underwriting Decision")
-    st.markdown("*Automated Risk-Based Underwriting Recommendation*")
-
-    with st.expander("ℹ️ What is this page? How to use it?", expanded=False):
-        st.markdown("""
-        **What:** The final underwriting recommendation page. It shows the combined risk score, the automated decision (Accept / Refer / Decline), mandatory conditions, and the full premium indication.
-
-        **Why:** Underwriters need a clear, auditable decision trail. This page consolidates the cyclone + flood risk into a single score, maps it to the company's risk appetite thresholds, and generates the appropriate conditions and pricing.
-
-        **How to use:**
-        - The **banner at the top** shows the decision outcome (green = accept, yellow = refer, red = decline).
-        - The **Risk Scoring Matrix** (heatmap) shows how all possible cyclone/flood combinations map to combined scores — find your intersection to understand where the risk sits.
-        - The **Decision Thresholds** table explains which score ranges trigger which decisions and who has authority.
-        - The **gauge** shows exactly where your combined score falls.
-        - Scroll down for **Conditions & Special Terms** that must be applied to the policy.
-        - The **Premium Indication** section provides a full breakdown of all loading factors and the final quoted price.
-        """)
-
-    if "assessment" not in st.session_state:
-        st.warning("⚠️ No assessment data. Please run a risk assessment first from the Dashboard.")
-        return
-
-    data = st.session_state["assessment"]
-    cyclone = data["cyclone"]
-    flood = data["flood"]
-    combined = data["combined_score"]
-    decision = data["decision"]
-    premium = data["premium"]
-    inp = data["inputs"]
-
-    # ── Decision banner ──
-    st.markdown(
-        f"""<div class="decision-{decision['class']}" style="margin-bottom:1.5rem">
-            <h1 style="margin:0;font-size:2.5rem">{decision['icon']}</h1>
-            <h2 style="margin:0.5rem 0">{decision['decision']}</h2>
-            <p style="margin:0;font-size:1.1rem">{decision['detail']}</p>
-            <p style="margin:0.5rem 0 0 0;opacity:0.9">Authority: {decision['authority']}</p>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-
-    # ── Risk matrix visualization ──
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("### Risk Scoring Matrix")
-        st.caption("💡 This heatmap shows the combined score for every cyclone×flood combination. Your assessed position is based on actual satellite data, not the midpoint used here.")
-
-        # Heatmap of risk combinations
-        cyclone_levels = list(CYCLONE_RISK_THRESHOLDS.keys())
-        flood_levels = [k for k in FLOOD_RISK_THRESHOLDS.keys() if k != "No Risk"]
-
-        matrix_data = []
-        for fl in flood_levels:
-            row = []
-            for cl in cyclone_levels:
-                cl_mid = sum(CYCLONE_RISK_THRESHOLDS[cl]) / 2
-                score = compute_combined_risk_score(cl_mid, fl)
-                row.append(score)
-            matrix_data.append(row)
-
-        fig = go.Figure(data=go.Heatmap(
-            z=matrix_data,
-            x=cyclone_levels,
-            y=flood_levels,
-            colorscale=[
-                [0, "#2ecc71"], [0.3, "#f1c40f"],
-                [0.6, "#e67e22"], [0.85, "#e74c3c"], [1.0, "#6c3483"],
-            ],
-            text=[[f"{v:.0f}" for v in row] for row in matrix_data],
-            texttemplate="%{text}",
-            textfont={"size": 14},
-            hovertemplate="Cyclone: %{x}<br>Flood: %{y}<br>Score: %{z:.1f}<extra></extra>",
-        ))
-        fig.update_layout(
-            title="Combined Risk Score Matrix",
-            xaxis_title="Cyclone Risk Level",
-            yaxis_title="Flood Risk Level",
-            height=400,
-            margin=dict(t=50, b=50),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    with col2:
-        st.markdown("### Decision Thresholds")
-
-        thresholds_df = pd.DataFrame([
-            {"Score Range": "0 – 30", "Decision": "✅ Auto Accept", "Authority": "System"},
-            {"Score Range": "30 – 50", "Decision": "✅ Accept w/ Conditions", "Authority": "Underwriter L1"},
-            {"Score Range": "50 – 70", "Decision": "⚠️ Refer to Senior UW", "Authority": "Senior UW"},
-            {"Score Range": "70 – 85", "Decision": "🔶 Refer to Chief UW", "Authority": "CUO"},
-            {"Score Range": "85 – 100", "Decision": "❌ Decline", "Authority": "Auto / CUO Override"},
-        ])
-        st.dataframe(thresholds_df, hide_index=True, use_container_width=True)
-
-        st.markdown(f"### Current Assessment: **{combined}** / 100")
-
-        # Score position indicator
-        fig2 = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=combined,
-            title={"text": "Combined NatCat Risk"},
-            gauge={
-                "axis": {"range": [0, 100]},
-                "bar": {"color": "#2c3e50"},
-                "steps": [
-                    {"range": [0, 30], "color": "#2ecc71"},
-                    {"range": [30, 50], "color": "#82e0aa"},
-                    {"range": [50, 70], "color": "#f1c40f"},
-                    {"range": [70, 85], "color": "#e67e22"},
-                    {"range": [85, 100], "color": "#e74c3c"},
-                ],
-            },
-        ))
-        fig2.update_layout(height=300, margin=dict(t=40, b=20))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # ── Conditions & Terms ──
-    if decision["conditions"]:
-        st.markdown("---")
-        st.markdown("### 📌 Conditions & Special Terms")
-        for i, cond in enumerate(decision["conditions"], 1):
-            st.markdown(f"**{i}.** {cond}")
-
-    # ── Premium summary ──
-    st.markdown("---")
-    st.markdown("### 💰 Premium Indication")
-
-    pc1, pc2 = st.columns(2)
-    with pc1:
-        st.markdown(f"""
-        | Item | Value |
-        |------|-------|
-        | **TSI** | {format_inr(inp['tsi'])} |
-        | **Base Rate** | {premium['base_rate_pct']:.2f}% |
-        | **Cyclone Loading** | +{premium['cyclone_loading_pct']:.0f}% |
-        | **Flood Loading** | +{premium['flood_loading_pct']:.0f}% |
-        | **Property Factor** | x{premium['property_factor']:.2f} |
-        | **Deductible Discount** | x{premium['deductible_discount']:.2f} |
-        | **Effective Rate** | {premium['effective_rate_pct']:.4f}% |
-        """)
-
-    with pc2:
-        st.markdown(f"""
-        | Component | Amount |
-        |-----------|--------|
-        | **Net Premium** | {format_inr(premium['net_premium'])} |
-        | **GST @ 18%** | {format_inr(premium['gst_18_pct'])} |
-        | **Total Premium** | **{format_inr(premium['total_premium'])}** |
-        """)
-
-        st.markdown(f"""
-        ---
-        **Policy Terms Recommended:**
-        - NatCat Deductible: {inp['deductible']}% of TSI
-        - Flood Sub-Limit: {'No sub-limit' if combined < 50 else '50% of TSI' if combined < 70 else '40% of TSI'}
-        - Cyclone Sub-Limit: {'No sub-limit' if combined < 50 else '70% of TSI' if combined < 70 else '60% of TSI'}
-        - Policy Period: Annual, non-cancellable for NatCat perils
-        """)
-
-
-# ══════════════════════════════════════════════════════════════════
 # PAGE: REPORT
 # ══════════════════════════════════════════════════════════════════
 
@@ -2882,12 +2801,21 @@ def render_report_page(inputs, ee_ready):
     dem = data.get("dem", {"elevation_m": 0, "risk_level": "Unknown", "risk_score": 0})
     combined = data["combined_score"]
     decision = data["decision"]
-    premium = data["premium"]
     inp = data["inputs"]
     ts = data["timestamp"]
 
     # ── Report preview ──
     loc_label = inp["city"] if inp["city"] else "Custom"
+
+    map_api_key = inputs.get("places_api_key") or get_places_api_key()
+    data = enrich_assessment_for_report(data, map_api_key, ee_ready)
+    report_loc = data.get("report_location", {})
+    loc_meta = {
+        "district": report_loc.get("district", "Unknown"),
+        "state": report_loc.get("state", "Unknown"),
+    }
+    static_map_url = report_loc.get("google_static_map_url", "")
+    flood_score = float(((report_loc.get("perils", {}).get("flood", {}) or {}).get("score", 0.0)))
 
     report_text = f"""
 ╔══════════════════════════════════════════════════════════════╗
@@ -2902,114 +2830,19 @@ Reference No: UW-NATCAT-{datetime.now().strftime('%Y%m%d%H%M%S')}
 1. RISK LOCATION
    Location: {loc_label}
    Coordinates: {inp['lat']:.4f}°N, {inp['lon']:.4f}°E
-    Buffer Radius: {inp['buffer_radius_m']} m
-   Coast Proximity: {inp['coast_proximity']}
+    District: {loc_meta.get('district', 'Unknown')}
+    State: {loc_meta.get('state', 'Unknown')}
 
-2. PROPERTY DETAILS
-   Total Sum Insured: {format_inr(inp['tsi'])}
-   Construction: {inp['construction']}
-   Occupancy: {inp['occupancy']}
-   Building Age: {inp['age']}
-   Floor Level: {inp['floor_level']}
+2. RISK LEVEL
+    Combined Score: {combined} / 100
+    Risk Level: {decision['decision']}
 
-3. CYCLONE RISK ASSESSMENT
-   Data Source: NOAA IBTrACS v4 (North Indian Basin)
-   Risk Score: {cyclone['risk_score']:.1f} / 100
-   Risk Level: {cyclone['risk_level']}
-   Premium Loading: +{premium['cyclone_loading_pct']:.0f}%
-
-4. FLOOD RISK ASSESSMENT
-   Data Source: JRC GloFAS Flood Hazard v2.1
-   Return Period: {inp['flood_rp']}
-   Flood Depth: {flood['depth_m']:.3f} m
-   Risk Level: {flood['risk_level']}
-   Premium Loading: +{premium['flood_loading_pct']:.0f}%
-
-5. ELEVATION & LOW-LYING AREA ASSESSMENT (DEM)
-    Data Source: USGS SRTMGL1_003 Digital Elevation Model
-   Elevation: {dem['elevation_m']:.2f} m
-   DEM Risk Level: {dem['risk_level']}
-   DEM Risk Score: {dem['risk_score']:.1f} / 100
-   Premium Loading: +{premium['dem_loading_pct']:.0f}%
-   
-   Interpretation:
-   - Areas < 10m: Very High Risk (40% loading) — Critical flood vulnerability
-   - Areas 10-25m: High Risk (25% loading) — Significant inundation exposure
-   - Areas 25-50m: Moderate Risk (10% loading) — Moderate vulnerability
-   - Areas 50-100m: Low Risk (0% loading) — Low vulnerability
-   - Areas > 100m: Very Low Risk (-5% discount) — Minimal vulnerability
-
-6. COMBINED RISK ASSESSMENT
-   Composite Score: {combined} / 100
-   Methodology: Weighted (Cyclone 45%, Flood 35%, DEM 20%)
-   
-   DEM Integration: Low-lying areas amplify flood damage during cyclones and
-   extreme rainfall events. Properties below 50m elevation face compounded risks
-   from:
-   - Storm surge and tidal effects during cyclone season
-   - Faster water accumulation and pooling during heavy rainfall
-   - Slower drainage due to topographic constraints
-   - Saltwater intrusion and water logging in the post-event period
-
-7. UNDERWRITING DECISION
-   Decision: {decision['decision']}
-   Authority: {decision['authority']}
-   Rationale: {decision['detail']}
-
-8. CONDITIONS
-{chr(10).join(f'   • {c}' for c in decision['conditions']) if decision['conditions'] else '   None'}
-
-9. PREMIUM INDICATION
-   Base Rate: {premium['base_rate_pct']:.2f}%
-   Cyclone Loading: +{premium['cyclone_loading_pct']:.0f}%
-   Flood Loading: +{premium['flood_loading_pct']:.0f}%
-   DEM Loading: +{premium['dem_loading_pct']:.0f}%
-   Total Peril Loading Factor: x{premium['peril_loading']:.2f}
-   Property Factor: x{premium['property_factor']:.2f}
-   Effective Rate: {premium['effective_rate_pct']:.4f}%
-   Net Premium: {format_inr(premium['net_premium'])}
-   GST (18%): {format_inr(premium['gst_18_pct'])}
-   TOTAL PREMIUM: {format_inr(premium['total_premium'])}
-   NatCat Deductible: {inp['deductible']}%
+3. INDIVIDUAL PERIL RISK
+    Cyclone Score: {cyclone.get('risk_score', 0.0):.1f} / 100 | Category: {cyclone.get('risk_level', 'Unknown')}
+    Flood Score: {flood_score:.1f} / 100 | Category: {flood.get('risk_level', 'Unknown')}
+    DEM Score: {dem.get('risk_score', 0.0):.1f} / 100 | Category: {dem.get('risk_level', 'Unknown')}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-TECHNICAL NOTES:
-
-DEM-Based Low-Lying Area Risk Assessment (SRTM):
-- Source: USGS SRTMGL1_003
-- Resolution: 30 meters
-- Vertical Accuracy: ±16 meters
-- Coverage: Global land areas between 60°N and 56°S
-- Application: Identifies properties in flood-prone topographic zones
-- Note: DEM elevation is used for risk calculations and premium loading. Map visualization uses Cyclone & Flood layers.
-
-Standard Practice for Property Insurance:
-- Elevation data from high-resolution DEMs is now a standard underwriting input
-- Properties in flood plains (< 50m elevation in coastal zones) face substantially
-  higher damage frequency and severity from combined cyclone + rainfall events
-- Insurance underwriters in India typically add 10-40% loading for low-lying areas
-- DEM-based property elevation verification is increasingly used for claims validation
-
-Risk Mitigation Strategies:
-- Properties with elevation < 25m should implement:
-  * Elevated HVAC systems and electrical equipment
-  * Flood-resistant building materials on ground floor
-  * Automatic sump pumps and drainage systems
-  * Cyclone shutters and reinforced openings
-  * Regular maintenance of drainage infrastructure
-
-DISCLAIMER: This is a system-generated indicative assessment based
-on satellite-derived hazard data. Final underwriting decisions must
-comply with company policy, regulatory requirements, and may require
-additional survey/inspection reports.
-
-Data Sources:
-- Cyclone: NOAA IBTrACS v4 (International Best Track Archive)
-- Flood: JRC/Copernicus CEMS GloFAS Flood Hazard Maps v2.1
-- Elevation: USGS SRTMGL1_003 (30m resolution, global coverage)
-- Engine: Google Earth Engine
-
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -3033,26 +2866,10 @@ Data Sources:
             "Location": loc_label,
             "Latitude": inp["lat"],
             "Longitude": inp["lon"],
-            "Buffer_Radius_m": inp["buffer_radius_m"],
-            "Elevation_m": dem['elevation_m'],
-            "TSI": inp["tsi"],
-            "Construction": inp["construction"],
-            "Occupancy": inp["occupancy"],
-            "Building_Age": inp["age"],
-            "Floor_Level": inp["floor_level"],
-            "Coast_Proximity": inp["coast_proximity"],
-            "Cyclone_Score": cyclone["risk_score"],
-            "Cyclone_Level": cyclone["risk_level"],
-            "Flood_Depth_m": flood["depth_m"],
-            "Flood_Level": flood["risk_level"],
-            "Flood_Return_Period": inp["flood_rp"],
-            "DEM_Risk_Level": dem['risk_level'],
-            "DEM_Risk_Score": dem['risk_score'],
+            "District": loc_meta.get("district", "Unknown"),
+            "State": loc_meta.get("state", "Unknown"),
             "Combined_Score": combined,
-            "Decision": decision["decision"],
-            "Net_Premium": premium["net_premium"],
-            "Total_Premium": premium["total_premium"],
-            "Effective_Rate": premium["effective_rate_pct"],
+            "Risk_Level": decision["decision"],
         }])
         st.download_button(
             "📥 Download Data (CSV)",
@@ -3071,30 +2888,14 @@ Data Sources:
                 "name": loc_label,
                 "lat": inp["lat"],
                 "lon": inp["lon"],
-                "buffer_radius_m": inp["buffer_radius_m"],
-                "coast_proximity": inp["coast_proximity"],
-                "elevation_m": dem['elevation_m'],
-            },
-            "property": {
-                "tsi": inp["tsi"],
-                "construction": inp["construction"],
-                "occupancy": inp["occupancy"],
-                "age": inp["age"],
-                "floor_level": inp["floor_level"],
+                "district": loc_meta.get("district", "Unknown"),
+                "state": loc_meta.get("state", "Unknown"),
+                "google_static_map_url": static_map_url,
             },
             "risk_assessment": {
-                "cyclone": cyclone,
-                "flood": flood,
-                "dem": dem,
                 "combined_score": combined,
-                "weighting": {"cyclone": 0.45, "flood": 0.35, "dem": 0.20},
+                "risk_level": decision["decision"],
             },
-            "decision": {
-                "outcome": decision["decision"],
-                "authority": decision["authority"],
-                "conditions": decision["conditions"],
-            },
-            "premium": premium,
         }
         st.download_button(
             "📥 Download JSON",
@@ -3744,6 +3545,11 @@ def render_history_page(inputs, ee_ready):
         payload = history_db.fetch_payload(int(sel_id))
         if payload:
             try:
+                payload = enrich_assessment_for_report(
+                    payload,
+                    get_places_api_key(),
+                    ee_ready,
+                )
                 pdf_bytes = build_assessment_pdf(payload)
                 st.download_button(
                     "📕 Download PDF for this Record",
@@ -3831,8 +3637,6 @@ def main():
         render_water_page(inputs, ee_ready)
     elif page == "🏭 Hazard Proximity (POI)":
         render_poi_page(inputs, ee_ready)
-    elif page == "📋 Underwriting Decision":
-        render_underwriting_page(inputs, ee_ready)
     elif page == "📄 Report":
         render_report_page(inputs, ee_ready)
     elif page == "📜 History":
