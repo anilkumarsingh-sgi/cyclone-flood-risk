@@ -1869,9 +1869,8 @@ def render_dashboard(inputs, ee_ready, ee_error: str | None = None):
         **How to use:**
         1. 👈 Set the **location and flood return period** in the left sidebar.
         2. Click **🔍 Run Risk Assessment** — the engine queries Google Earth Engine for live hazard data.
-        3. Review the **5 metric cards** (Cyclone Score, Flood Depth, Combined Score, Premium, Decision).
+        3. Review the **4 metric cards** (Cyclone Score, Flood Depth, Elevation, Combined Score).
         4. Explore the **interactive risk map** (toggle Cyclone/Flood layers via the layer control icon).
-        5. Scroll down for the **premium breakdown** showing how each factor contributes to the final price.
         """)
 
     if not ee_ready:
@@ -1968,10 +1967,9 @@ def render_dashboard(inputs, ee_ready, ee_error: str | None = None):
         dem = data["dem"]
         combined = data["combined_score"]
         decision = data["decision"]
-        premium = data["premium"]
 
         # ── Top metric cards ──
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.markdown(metric_card("Cyclone Risk", f"{cyclone['risk_score']:.1f}",
                                     "metric-orange" if cyclone["risk_score"] > 50 else "metric-green"),
@@ -1986,17 +1984,6 @@ def render_dashboard(inputs, ee_ready, ee_error: str | None = None):
             css = "metric-red" if combined > 70 else ("metric-yellow" if combined > 40 else "metric-green")
             st.markdown(metric_card("Combined Score", f"{combined}", css),
                         unsafe_allow_html=True)
-        with c5:
-            st.markdown(metric_card("Total Premium", format_inr(premium["total_premium"]),
-                                    "metric-blue"), unsafe_allow_html=True)
-        with c6:
-            st.markdown(
-                f"""<div class="metric-card {'metric-green' if decision['class'] == 'accept'
-                    else 'metric-yellow' if decision['class'] == 'refer' else 'metric-red'}">
-                    <h3>Decision</h3><h1>{decision['icon']}</h1>
-                    <p style="font-size:0.75rem;margin:0">{decision['decision']}</p></div>""",
-                unsafe_allow_html=True,
-            )
 
         st.markdown("---")
 
@@ -2051,7 +2038,6 @@ def render_dashboard(inputs, ee_ready, ee_error: str | None = None):
             st.markdown(f"**Location:** {loc_label} ({inputs['lat']:.4f}°N, {inputs['lon']:.4f}°E)")
             st.markdown(f"**Buffer Radius:** {inputs['buffer_radius_m']} m")
             st.markdown(f"**Assessment Date:** {datetime.now().strftime('%d %B %Y, %H:%M')}")
-            st.markdown(f"**TSI:** {format_inr(inputs['tsi'])}")
 
             st.markdown("---")
 
@@ -2068,77 +2054,6 @@ def render_dashboard(inputs, ee_ready, ee_error: str | None = None):
             st.markdown(f"&nbsp;&nbsp;&nbsp;Elevation: `{dem['elevation_m']:.0f}` m | Risk Score: `{dem['risk_score']:.0f}` / 100")
 
             st.markdown(f"**📊 Combined Score:** `{combined}` / 100 (Cyclone 45%, Flood 35%, DEM 20%)")
-
-            st.markdown("---")
-
-            # Decision summary
-            st.markdown(f"### {decision['icon']} {decision['decision']}")
-            st.markdown(f"*{decision['detail']}*")
-            st.markdown(f"**Authority:** {decision['authority']}")
-
-            if decision["conditions"]:
-                st.markdown("**Conditions:**")
-                for cond in decision["conditions"]:
-                    st.markdown(f"- {cond}")
-
-        # ── Premium breakdown ──
-        st.markdown("---")
-        st.markdown('<div class="section-header"><h3>💰 Premium Breakdown</h3></div>',
-                    unsafe_allow_html=True)
-        with st.expander("ℹ️ How is the premium calculated?"):
-            st.markdown("""
-            **Formula:** `TSI × Base Rate × Peril Loading × Property Factor × Deductible Discount`
-
-            - **Peril Loadings** — Additional charges based on cyclone & flood risk levels (additive: e.g. +35% cyclone + 20% flood = 1.55×).
-            - **Property Factors** — Multipliers for construction quality, occupancy, building age, floor level, and coast proximity (multiplicative).
-            - **Deductible Discount** — Higher self-insured retention lowers the premium (up to 12.5% discount).
-            - **Minimum Premium:** ₹2,500 floor regardless of calculation.
-            - **GST:** 18% added to net premium.
-            """)
-
-        pc1, pc2, pc3 = st.columns(3)
-
-        with pc1:
-            st.markdown("**Peril Loadings**")
-            loading_df = pd.DataFrame({
-                "Factor": ["Cyclone Loading", "Flood Loading", "DEM Loading", "Total Peril Loading"],
-                "Value": [
-                    f"+{premium['cyclone_loading_pct']:.0f}%",
-                    f"+{premium['flood_loading_pct']:.0f}%",
-                    f"+{premium['dem_loading_pct']:.0f}%",
-                    f"x{premium['peril_loading']:.2f}",
-                ],
-            })
-            st.dataframe(loading_df, hide_index=True, use_container_width=True)
-
-        with pc2:
-            st.markdown("**Property Factors**")
-            prop_df = pd.DataFrame({
-                "Factor": ["Construction", "Occupancy", "Building Age",
-                           "Floor Level", "Coast Proximity", "Combined"],
-                "Multiplier": [
-                    f"x{premium['construction_factor']:.2f}",
-                    f"x{premium['occupancy_factor']:.2f}",
-                    f"x{premium['age_factor']:.2f}",
-                    f"x{premium['floor_factor']:.2f}",
-                    f"x{premium['coast_factor']:.2f}",
-                    f"x{premium['property_factor']:.2f}",
-                ],
-            })
-            st.dataframe(prop_df, hide_index=True, use_container_width=True)
-
-        with pc3:
-            st.markdown("**Premium Summary**")
-            summ_df = pd.DataFrame({
-                "Item": ["Effective Rate", "Net Premium", "GST (18%)", "**Total Premium**"],
-                "Amount": [
-                    f"{premium['effective_rate_pct']:.4f}%",
-                    format_inr(premium["net_premium"]),
-                    format_inr(premium["gst_18_pct"]),
-                    format_inr(premium["total_premium"]),
-                ],
-            })
-            st.dataframe(summ_df, hide_index=True, use_container_width=True)
 
     else:
         # No assessment yet
