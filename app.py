@@ -324,7 +324,17 @@ def init_earth_engine():
         # Use service account credentials (local secrets.toml or Streamlit Cloud)
         if "earthengine" in st.secrets:  # type: ignore[operator]
             from google.oauth2 import service_account as _sa
-            key_dict = json.loads(st.secrets["earthengine"]["private_key_json"])  # type: ignore[index]
+            sec = st.secrets["earthengine"]  # type: ignore[index]
+            key_dict = {
+                "type": "service_account",
+                "project_id": sec["project_id"],
+                "private_key_id": sec["private_key_id"],
+                "private_key": sec["private_key"],
+                "client_email": sec["client_email"],
+                "client_id": sec["client_id"],
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
             credentials = _sa.Credentials.from_service_account_info(
                 key_dict,
                 scopes=["https://www.googleapis.com/auth/earthengine"],
