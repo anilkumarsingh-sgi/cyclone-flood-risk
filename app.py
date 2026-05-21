@@ -321,24 +321,26 @@ REFERENCE_LOCATIONS = {
 def init_earth_engine():
     """Initialize Google Earth Engine with authentication."""
     try:
-        # Use service account credentials when deployed on Streamlit Cloud
-        if "gee" in st.secrets:
-            credentials = ee.ServiceAccountCredentials(
-                st.secrets["gee"]["service_account"],
-                key_data=st.secrets["gee"]["private_key"],
+        # Use service account credentials (local secrets.toml or Streamlit Cloud)
+        if "earthengine" in st.secrets:  # type: ignore[operator]
+            from google.oauth2 import service_account as _sa
+            key_dict = json.loads(st.secrets["earthengine"]["private_key_json"])  # type: ignore[index]
+            credentials = _sa.Credentials.from_service_account_info(
+                key_dict,
+                scopes=["https://www.googleapis.com/auth/earthengine"],
             )
             ee.Initialize(credentials, project="ee-singhanil854")
-            return True
+            return True, None
         # Fall back to local OAuth token
         ee.Initialize(project="ee-singhanil854")
-        return True
-    except Exception:
+        return True, None
+    except Exception as e1:
         try:
             ee.Authenticate()
             ee.Initialize(project="ee-singhanil854")
-            return True
-        except Exception as e:
-            return False
+            return True, None
+        except Exception as e2:
+            return False, f"Primary error: {e1}\nFallback error: {e2}"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1737,7 +1739,7 @@ def render_sidebar():
 # PAGE: DASHBOARD
 # ══════════════════════════════════════════════════════════════════
 
-def render_dashboard(inputs, ee_ready):
+def render_dashboard(inputs, ee_ready, ee_error: str | None = None):
     st.markdown("# 📊 NatCat Underwriting Dashboard")
     st.markdown("*Multi-Peril Natural Catastrophe Risk Assessment for Insurance Underwriting*")
 
@@ -1760,6 +1762,8 @@ def render_dashboard(inputs, ee_ready):
             "⚠️ Google Earth Engine not authenticated. "
             "Run `earthengine authenticate` in your terminal, then restart the app."
         )
+        if ee_error:
+            st.exception(ee_error)
         st.info("The app requires a valid Earth Engine account to query satellite-derived risk data.")
         return
 
@@ -3778,13 +3782,13 @@ def render_history_page(inputs, ee_ready):
 # ══════════════════════════════════════════════════════════════════
 
 def main():
-    ee_ready = init_earth_engine()
+    ee_ready, ee_error = init_earth_engine()
     inputs = render_sidebar()
 
     page = inputs["page"]
 
     if page == "📊 Dashboard":
-        render_dashboard(inputs, ee_ready)
+        render_dashboard(inputs, ee_ready, ee_error)
     elif page == "🌀 Cyclone Risk":
         render_cyclone_page(inputs, ee_ready)
     elif page == "🌊 Flood Risk":
