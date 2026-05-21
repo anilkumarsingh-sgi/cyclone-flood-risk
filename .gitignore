@@ -5,3 +5,4 @@ flood/
 .env
 *.json
 !requirements.txt
+.streamlit/secrets.toml

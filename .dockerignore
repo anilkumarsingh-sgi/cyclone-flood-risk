@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+flood/
+venv/
+.venv/
+.git/
+.gitignore
+.streamlit/secrets.toml
+*.db
+data/
+*.log
+.vscode/
+.idea/
+.DS_Store
+node_modules/

@@ -10,6 +10,7 @@ import streamlit as st
 import ee
 import json
 import math
+import os
 import folium
 import requests
 import pandas as pd
@@ -321,24 +322,47 @@ REFERENCE_LOCATIONS = {
 def init_earth_engine():
     """Initialize Google Earth Engine with authentication."""
     try:
-        # Use service account credentials (local secrets.toml or Streamlit Cloud)
-        if "earthengine" in st.secrets:  # type: ignore[operator]
+        # Use service account credentials from secrets.toml / Streamlit Cloud.
+        # Supports both [earthengine] and [json_key] section names.
+        if "earthengine" in st.secrets or "json_key" in st.secrets:  # type: ignore[operator]
             from google.oauth2 import service_account as _sa
-            sec = st.secrets["earthengine"]  # type: ignore[index]
-            # Only client_email and private_key are required by google-auth
+            sec = st.secrets.get("earthengine", st.secrets.get("json_key"))  # type: ignore[attr-defined]
+            if not sec:
+                raise RuntimeError("Missing service account secret block.")
+
+            private_key = sec["private_key"]
+            # Handle escaped newlines when key is provided as a single-line string.
+            private_key = private_key.replace("\\n", "\n")
+
             key_dict = {
-                "type": "service_account",
+                "type": sec.get("type", "service_account"),  # type: ignore[union-attr]
+                "project_id": sec.get("project_id", "ee-singhanil854"),  # type: ignore[union-attr]
                 "client_email": sec["client_email"],
-                "private_key": sec["private_key"],
+                "private_key": private_key,
                 "private_key_id": sec.get("private_key_id", ""),  # type: ignore[union-attr]
-                "token_uri": "https://oauth2.googleapis.com/token",
+                "token_uri": sec.get("token_uri", "https://oauth2.googleapis.com/token"),  # type: ignore[union-attr]
             }
             credentials = _sa.Credentials.from_service_account_info(
                 key_dict,
                 scopes=["https://www.googleapis.com/auth/earthengine"],
             )
-            ee.Initialize(credentials, project="ee-singhanil854")
+            ee.Initialize(credentials, project=key_dict["project_id"])
             return True, None
+
+        # Support path-based credentials via environment variable.
+        # Example: GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+        creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+        if creds_path:
+            with open(creds_path, "r", encoding="utf-8") as f:
+                key_dict = json.load(f)
+            from google.oauth2 import service_account as _sa
+            credentials = _sa.Credentials.from_service_account_info(
+                key_dict,
+                scopes=["https://www.googleapis.com/auth/earthengine"],
+            )
+            ee.Initialize(credentials, project=key_dict.get("project_id", "ee-singhanil854"))
+            return True, None
+
         # Fall back to local OAuth token
         ee.Initialize(project="ee-singhanil854")
         return True, None

@@ -30,6 +30,26 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Earth Engine Authentication
+
+The app supports 3 authentication modes (in priority order):
+
+1. `.streamlit/secrets.toml` section `[earthengine]`
+2. `.streamlit/secrets.toml` section `[json_key]` (same fields as above)
+3. `GOOGLE_APPLICATION_CREDENTIALS` environment variable pointing to a JSON key file
+
+Example `secrets.toml` block:
+
+```toml
+[json_key]
+type = "service_account"
+project_id = "your-ee-project-id"
+private_key_id = "your-private-key-id"
+private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+client_email = "your-sa@your-ee-project-id.iam.gserviceaccount.com"
+token_uri = "https://oauth2.googleapis.com/token"
+```
+
 ## Pages
 
 | Page | Description |

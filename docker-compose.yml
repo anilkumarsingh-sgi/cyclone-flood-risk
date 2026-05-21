@@ -1,0 +1,22 @@
+version: "3.9"
+
+services:
+  natcat:
+    build: .
+    image: natcat-underwriting:latest
+    container_name: natcat-underwriting
+    ports:
+      - "8501:8501"
+    volumes:
+      # Persist the SQLite history database
+      - natcat-data:/app/data
+      # Mount EE service-account JSON + Streamlit secrets (read-only)
+      - ./.streamlit:/app/.streamlit:ro
+    environment:
+      - NATCAT_DB_PATH=/app/data/history.db
+      # Path to your Earth Engine service-account key (mounted via .streamlit)
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/.streamlit/ee-service-account.json
+    restart: unless-stopped
+
+volumes:
+  natcat-data:
