@@ -516,14 +516,31 @@ def get_cyclone_risk_at_point(lat: float, lon: float, buffer_radius_m: int = 0) 
         .rename("risk")
     )
 
-    sampled = risk.reduceRegion(
-        reducer=ee.Reducer.mean(),
-        geometry=query_geom,
-        scale=20000,
-        bestEffort=True,
-    )
-    result = sampled.getInfo()
-    risk_val = result.get("risk")
+    # The cyclone hazard image is reprojected to a coarse ~20 km grid and is
+    # masked where hazard <= 0. A point sample can therefore land on a masked
+    # edge pixel even when the surrounding tiles are clearly colored. Retry
+    # with progressively larger buffers until we get a valid sample, so the
+    # result matches what is visible on the map. Use `max` for any buffered
+    # sample so an intersected high-risk pixel drives the result (matches the
+    # user-visible classification on the map).
+    risk_val = None
+    sampled_buffer = buffer_radius_m
+    fallback_buffers = [buffer_radius_m, max(buffer_radius_m, 25000), 50000]
+    for try_buffer in fallback_buffers:
+        geom = point if try_buffer <= 0 else point.buffer(try_buffer)
+        reducer = ee.Reducer.max() if try_buffer > 0 else ee.Reducer.mean()
+        sampled = risk.reduceRegion(
+            reducer=reducer,
+            geometry=geom,
+            scale=20000,
+            bestEffort=True,
+        )
+        result = sampled.getInfo()
+        val = result.get("risk")
+        if val is not None:
+            risk_val = val
+            sampled_buffer = try_buffer
+            break
 
     if risk_val is None:
         return {"risk_score": 0.0, "risk_level": "Low", "raw_value": None}
